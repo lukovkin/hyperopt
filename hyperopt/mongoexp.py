@@ -178,9 +178,12 @@ def read_pw():
             password=password)
 
 
-def authenticate_for_db(db):
-    d = read_pw()
-    db.authenticate(d['username'], d['password'])
+def authenticate_for_db(db, user=None, pw=None):
+    if not user:
+        d = read_pw()
+        db.authenticate(d['username'], d['password'])
+    else:
+        db.authenticate(user, pw)
 
 
 def parse_url(url, pwfile=None):
@@ -230,7 +233,7 @@ def parse_url(url, pwfile=None):
 
 
 def connection_with_tunnel(host='localhost',
-            auth_dbname='admin', port=27017,
+            auth_dbname='hyperopt', port=27017,
             ssh=False, user='hyperopt', pw=None):
         if ssh:
             local_port=numpy.random.randint(low=27500, high=28000)
@@ -245,27 +248,30 @@ def connection_with_tunnel(host='localhost',
                     )
             # -- give the subprocess time to set up
             time.sleep(.5)
-            connection = pymongo.Connection('127.0.0.1', local_port,
+            connection = pymongo.MongoClient('127.0.0.1', local_port,
                     document_class=SON)
         else:
-            connection = pymongo.Connection(host, port, document_class=SON)
+            connection = pymongo.MongoClient(host, port, document_class=SON)
             if user:
                 if user == 'hyperopt':
-                    authenticate_for_db(connection[auth_dbname])
+                    authenticate_for_db(connection[auth_dbname], user, pw)
                 else:
                     raise NotImplementedError()
             ssh_tunnel=None
 
-        # -- Ensure that changes are written to at least once server.
-        connection.write_concern['w'] = 1
-        # -- Ensure that changes are written to the journal if there is one.
-        connection.write_concern['j'] = True
+        # # -- Ensure that changes are written to at least once server.
+        # connection.write_concern['w'] = 1
+        # # -- Ensure that changes are written to the journal if there is one.
+        # connection.write_concern['j'] = True
+        pymongo.write_concern.WriteConcern(w=1, j=True)
 
         return connection, ssh_tunnel
 
 
 def connection_from_string(s):
+    print(s)
     protocol, user, pw, host, port, db, collection = parse_url(s)
+    print(protocol, user, pw, host, port, db, collection)
     if protocol == 'mongo':
         ssh=False
     elif protocol in ('mongo+ssh', 'ssh+mongo'):
@@ -324,7 +330,8 @@ class MongoJobs(object):
         """
         self.db = db
         self.jobs = jobs
-        assert jobs.write_concern['w'] >= 1
+        #assert jobs.write_concern ['w'] >= 1
+        assert jobs.write_concern.acknowledged
         self.gfs = gfs
         self.conn = conn
         self.tunnel = tunnel
@@ -345,6 +352,7 @@ class MongoJobs(object):
 
     @classmethod
     def new_from_connection_str(cls, conn_str, gfs_coll='fs', config_name='spec'):
+        print(conn_str)
         connection, tunnel, db, coll = connection_from_string(conn_str)
         gfs = gridfs.GridFS(db, collection=gfs_coll)
         return cls(db, coll, gfs, connection, tunnel, config_name)
@@ -408,7 +416,7 @@ class MongoJobs(object):
             # -- so now we return the dict with the _id field
             assert _id == cpy['_id']
             return cpy
-        except pymongo.errors.OperationFailure, e:
+        except pymongo.errors.OperationFailure as e:
             # -- translate pymongo error class into hyperopt error class
             #    This was meant to make it easier to catch insertion errors
             #    in a generic way even if different databases were used.
@@ -419,7 +427,7 @@ class MongoJobs(object):
         """Delete job[s]"""
         try:
             self.jobs.remove(job)
-        except pymongo.errors.OperationFailure, e:
+        except pymongo.errors.OperationFailure as e:
             # -- translate pymongo error class into hyperopt error class
             #    see insert() code for rationale.
             raise OperationFailure(e)
@@ -429,7 +437,7 @@ class MongoJobs(object):
         if cond is None:
             cond = {}
         try:
-            for d in self.jobs.find(spec=cond, fields=['_id', '_attachments']):
+            for d in self.jobs.find(spec=cond, projection=['_id', '_attachments']):
                 logger.info('deleting job %s' % d['_id'])
                 for name, file_id in d.get('_attachments', []):
                     try:
@@ -438,7 +446,7 @@ class MongoJobs(object):
                         logger.error('failed to remove attachment %s:%s' % (
                             name, file_id))
                 self.jobs.remove(d)
-        except pymongo.errors.OperationFailure, e:
+        except pymongo.errors.OperationFailure as e:
             # -- translate pymongo error class into hyperopt error class
             #    see insert() code for rationale.
             raise OperationFailure(e)
@@ -476,7 +484,7 @@ class MongoJobs(object):
                  },
                 new=True,
                 upsert=False)
-        except pymongo.errors.OperationFailure, e:
+        except pymongo.errors.OperationFailure as e:
             logger.error('Error during reserve_job: %s'%str(e))
             rval = None
         return rval
@@ -521,7 +529,7 @@ class MongoJobs(object):
                     {'$set': dct},
                     upsert=False,
                     multi=False,)
-        except pymongo.errors.OperationFailure, e:
+        except pymongo.errors.OperationFailure as e:
             # -- translate pymongo error class into hyperopt error class
             #    see insert() code for rationale.
             raise OperationFailure(e)
@@ -707,7 +715,7 @@ class MongoTrials(Trials):
         _trials = orig_trials[:] #copy to make sure it doesn't get screwed up
         if _trials:
             db_data = list(self.handle.jobs.find(query,
-                                            fields=['_id', 'version']))
+                                            projection=['_id', 'version']))
             # -- pull down a fresh list of ids from mongo
             if db_data:
                 #make numpy data arrays
@@ -1065,7 +1073,7 @@ class MongoWorker(object):
                     blob = ctrl.trials.attachments[cmd[1]]
                     try:
                         domain = cPickle.loads(blob)
-                    except BaseException, e:
+                    except BaseException as e:
                         logger.info('Error while unpickling. Try installing dill via "pip install dill" for enhanced pickling support.')
                         raise
                     worker_fn = domain.evaluate
@@ -1075,7 +1083,7 @@ class MongoWorker(object):
                 with temp_dir(workdir, erase_created_workdir), working_dir(workdir):
                     result = worker_fn(spec, ctrl)
                     result = SONify(result)
-            except BaseException, e:
+            except BaseException as e:
                 #XXX: save exception to database, but if this fails, then
                 #      at least raise the original traceback properly
                 logger.info('job exception: %s' % str(e))
