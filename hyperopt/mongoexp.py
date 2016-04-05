@@ -412,7 +412,8 @@ class MongoJobs(object):
         try:
             cpy = copy.deepcopy(job)
             # -- this call adds an _id field to cpy
-            _id = self.jobs.insert(cpy, check_keys=True)
+            #_id = self.jobs.insert(cpy, check_keys=True)
+            _id = self.jobs.insert_one(cpy)
             # -- so now we return the dict with the _id field
             assert _id == cpy['_id']
             return cpy
@@ -810,7 +811,7 @@ class MongoTrials(Trials):
     def _insert_trial_docs(self, docs):
         rval = []
         for doc in docs:
-            rval.append(self.handle.jobs.insert(doc))
+            rval.append(self.handle.jobs.insert_one(doc))
         return rval
 
     def count_by_state_unsynced(self, arg):
@@ -867,7 +868,11 @@ class MongoTrials(Trials):
 
         doc = None
         while doc is None:
-            doc = db.job_ids.find_and_modify(
+            # doc = db.job_ids.find_and_modify(
+            #         query,
+            #         {'$inc' : {'last_id': N}},
+            #         upsert=True)
+            doc = db.job_ids.find_one_and_update(
                     query,
                     {'$inc' : {'last_id': N}},
                     upsert=True)
